@@ -1,14 +1,14 @@
 #Define the server connectivity, create threads, use protocol to serve.
-import socket, time, threading, os, sys, time, datetime
+import socket, time, threading, os, sys, time, datetime, signal
 from connection import CustomSocket
-from base64 import b16decode, b64encode
+from base64 import b64decode, b64encode
+import simplejson as json
 
 ########################################################################################################################
 
 #server config
 host = ""
 port = 36699
-server_sock = CustomSocket.newCustomSocket(socket.AF_INET, socket.SOCK_STREAM)
 user_file = "userdb"
 group_file = "groupdb"
 userdb = None
@@ -29,20 +29,19 @@ def sendmsg(frm, to, msg, timestamp):
 	Send message to user or group
 	"""
 	global locks, mdir
-	towrite = "[{}] to:{} from:{} \"{}\"".format(datetime.fromtimestamp(timestamp), to, frm, msg)
+	towrite = "[{}] to:{} from:{} \"{}\"".format(datetime.datetime.fromtimestamp(timestamp), to, frm, msg)
 	if to in userdb:
 		if os.path.isfile(mdir + to):
 			locks[to].acquire()
 			with open(mdir + to, 'a') as f:
 				f.write(towrite + "\n")
-				i += 1
 			locks[to].release()
 		return True, 1
 	elif to in groupdb:
 		to_list = groupdb[to]
 		i = 0
 		for r in to_list:
-			if os.path.isfile(mdir + r):
+			if r != frm and os.path.isfile(mdir + r):
 				locks[r].acquire()
 				with open(mdir + r, 'a') as f:
 					f.write(towrite + "\n")
@@ -64,7 +63,7 @@ def unread_retrieve(frm):
 		return False, []
 	locks[frm].acquire()
 	with open(mdir + frm, 'r') as f:
-		msgs = [line for line in f]
+		msgs = [line.rstrip() for line in f]
 	open(mdir + frm, 'w').close()
 	locks[frm].release()
 	return True, msgs
@@ -92,8 +91,7 @@ def login(user, passwd):
 	"""
 	if user not in userdb:
 		return False
-	else:
-		if userdb[user][1] = passwd:
+	elif userdb[user][0] == passwd:
 			return True
 	return False
 
@@ -101,12 +99,15 @@ def signup(user, passwd):
 	"""
 	Add a user
 	"""
-	global dblock
+	print "In signup: user={}, passwd={}".format(user, passwd)
+	global dblock, mdir
 	if user in userdb:
 		return False
 	dblock.acquire()
 	userdb[user] = (passwd, "USR")
 	dblock.release()
+	open(mdir + user, 'a').close()
+	locks[user] = threading.Lock()
 	return True
 
 def mkgroup(name, members):
@@ -121,7 +122,7 @@ def mkgroup(name, members):
 	dblock.release()
 	return True
 
-def addgroup(name, members, user):
+def addgroup(name, member, user):
 	"""
 	Add members to group
 	"""
@@ -130,8 +131,10 @@ def addgroup(name, members, user):
 		return False
 	if user not in groupdb[name]:
 		return False
+	if member not in userdb:
+		return False
 	dblock.acquire()
-	groupdb[name].extend(members)
+	groupdb[name].append(member)
 	dblock.release()
 	return True
 
@@ -201,7 +204,7 @@ def shutdown():
 	for t in cs.server_threads:
 		t.join()
 	#save users
-	with open(user_file 'w') as uf:
+	with open(user_file, 'w') as uf:
 		jstr = json.dumps(userdb)
 		uf.write(jstr)
 	#save groups
@@ -238,7 +241,7 @@ class ChatHandler(threading.Thread):
 				req = json.loads(b64decode(reqstr))
 				print "REQ: {}".format(req)
 				resp = {}
-				if not req["do"] or req["from"]:
+				if not req["do"] or not req["from"]:
 					resp["status"] = "ERR"
 					resp["body"] = "Malformed request"
 				elif req["do"] == "send":
@@ -253,8 +256,8 @@ class ChatHandler(threading.Thread):
 						else:
 							resp["done"] = "send"
 							resp["status"] = "OK"
-							resp["body"] = "Message sent to {} out of {} recipients".format(sent, len(req["to"]))
-				elif req["do"] = "unread_count":
+							resp["body"] = "Message sent to {} recipients".format(sent)
+				elif req["do"] == "unread_count":
 					op, count = unread_count(req["from"])
 					if not op:
 						resp["status"] = "ERR"
@@ -264,7 +267,7 @@ class ChatHandler(threading.Thread):
 						resp["status"] = "OK"
 						resp["body"] = "Messages counted"
 						resp["count"] = count
-				elif req["do"] = "unread_retrieve":
+				elif req["do"] == "unread_retrieve":
 					op, msgs = unread_retrieve(req["from"])
 					if not op:
 						resp["status"] = "ERR"
@@ -274,7 +277,7 @@ class ChatHandler(threading.Thread):
 						resp["status"] = "OK"
 						resp["body"] = "Messages retreived"
 						resp["msgs"] = msgs
-				elif req["do"] = "mkgroup":
+				elif req["do"] == "mkgroup":
 					if not req["name"] or not req["members"]:
 						resp["status"] = "ERR"
 						resp["body"] = "Missing arguments"
@@ -282,20 +285,20 @@ class ChatHandler(threading.Thread):
 						op = mkgroup(req["name"], req["members"])
 						if not op:
 							resp["status"] = "ERR"
-							resp["body"] = "Could create group"
+							resp["body"] = "Couldn't create group"
 						else:
 							resp["done"] = "mkgroup"
 							resp["status"] = "OK"
 							resp["body"] = "Group created"
 				elif req["do"] == "addgroup":
-					if not req["name"] or not req["members"]:
+					if not req["name"] or not req["member"]:
 						resp["status"] = "ERR"
 						resp["body"] = "Missing arguments"
 					else:
-						op = addgroup(req["name"], req["members"], req["from"])
+						op = addgroup(req["name"], req["member"], req["from"])
 						if not op:
 							resp["status"] = "ERR"
-							resp["body"] = "Could create group"
+							resp["body"] = "Couldn't create group"
 						else:
 							resp["done"] = "addgroup"
 							resp["status"] = "OK"
@@ -308,7 +311,7 @@ class ChatHandler(threading.Thread):
 						op = login(req["from"], req["password"])
 						if not op:
 							resp["status"] = "ERR"
-							resp["body"] = "Could log you in (user doesn't exist)"
+							resp["body"] = "Couldn't log you in (user doesn't exist)"
 						else:
 							resp["done"] = "login"
 							resp["status"] = "OK"
@@ -321,7 +324,7 @@ class ChatHandler(threading.Thread):
 						op = signup(req["from"], req["password"])
 						if not op:
 							resp["status"] = "ERR"
-							resp["body"] = "Could add user"
+							resp["body"] = "Couldn't add user"
 						else:
 							resp["done"] = "signup"
 							resp["status"] = "OK"
@@ -347,6 +350,7 @@ class ChatServer:
 		"""
 		Construst a ChatServer object, using default config options
 		"""
+		self.server_sock = CustomSocket.newCustomSocket(socket.AF_INET, socket.SOCK_STREAM)
 		self.host = host
 		self.port = port
 		self.server_threads = []
@@ -363,7 +367,7 @@ class ChatServer:
 			print "Server waiting on TCP port {}".format(self.port)
 			(clientsocket, address) = self.server_sock.accept()
 			print "Accepted connection from: {}".format(address)
-			ct = chat.ChatHandler(clientsocket)
+			ct = ChatHandler(clientsocket)
 			self.server_threads.append(ct)
 			ct.start()
 
@@ -371,7 +375,7 @@ class ChatServer:
 
 if __name__=='__main__':
 	signal.signal(signal.SIGINT, int_handler)
-	cs = ChatServer()
+	cs = ChatServer(host, port)
 	options()
 	startup()
 	print_server_settings()

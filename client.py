@@ -13,6 +13,8 @@ def int_handler(sig, frame):
 	Ctrl+C handler, for when we exit the client forcefully
 	"""
 	cc.save_contacts()
+	if cc.auto:
+		cc.timer.cancel()
 	cc.sock.close()
 	sys.exit(0)
 
@@ -32,8 +34,10 @@ class ChatClient:
 		self.debug = False
 		self.auto = False
 		self.interval = 30
+		self.timer = None
 		self.socket_lock = threading.Lock()
 		self.contacts_file = 'contacts'
+		self.first = False
 		self.contacts = {}
 		self.messages = []
 		self.prompt = "chat>"
@@ -53,6 +57,7 @@ class ChatClient:
 		parser.add_argument("-a", "--automated", help="Turn on automated message checking", action='store_true')
 		parser.add_argument("-i", "--interval", help="Interval for checking messages", type=int)
 		parser.add_argument("-u", "--user", help="Login as this user (will be prompted for password)")
+		parser.add_argument("-f", "--first", help="Sign up instead of logging in", action='store_true')
 
 		args = parser.parse_args()
 
@@ -72,6 +77,8 @@ class ChatClient:
 			self.interval = args.interval
 		if args.user is not None:
 			self.user = args.user
+		if args.first:
+			self.first = True
 
 	def read_config(self):
 		"""
@@ -79,7 +86,7 @@ class ChatClient:
 		"""
 		with open("chat.cfg", 'r') as cf:
 			for line in cf:
-				if line[0] == '#':
+				if line == "\n" or line[0] == '#':
 					continue
 				parts = line.split('=')
 				if len(parts) > 2:
@@ -108,7 +115,10 @@ class ChatClient:
 		"""
 		with open(self.contacts_file, 'r') as cf:
 			jstr = cf.read()
-			self.contacts = json.loads(jstr)
+			if jstr:
+				self.contacts = json.loads(jstr)
+			else:
+				self.contacts = {}
 
 	def save_contacts(self):
 		"""
@@ -116,7 +126,8 @@ class ChatClient:
 		"""
 		with open(self.contacts_file, 'w') as cf:
 			jstr = json.dumps(self.contacts)
-			cf.write(jstr)
+			if jstr:
+				cf.write(jstr)
 
 	def print_help(self):
 		print "Chat client commads and syntax:"
@@ -168,33 +179,36 @@ class ChatClient:
 		elif command == "quit":
 			#exit
 			self.save_contacts()
+			if self.auto:
+				self.timer.cancel()
 			self.sock.close()
 			sys.exit(0)
 		else:
 			#check for group definition
 			import re
-			if re.match('[a-zA-Z0-9_]+=.*'):
+			if re.match('[a-zA-Z0-9_]+=.*', command):
 				req["do"] = 'mkgroup'
 				parts = command.split("=")
 				if len(parts) > 2:
-					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>..."
+					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>...1"
 					return None
 				req["name"] = parts[0]
-				people = parts[1].split(',')
+				people = parts[1].split('+')
+				print "people={}".format(people)
 				if len(people) <= 1:
-					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>..."
+					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>...2"
 					return None
 				req["members"] = people
+				req["members"].append(self.user)
 				return req
-			elif re.match('[a-zA-Z0-9_]+\+=.*'):
+			elif re.match('[a-zA-Z0-9_]+\+=.*', command):
 				req["do"] = 'addgroup'
 				parts = command.split("+=")
 				if len(parts) > 2:
 					print >> sys.stderr, "Badly formed group-add command\n<group>+=<user>+<user>..."
 					return None
 				req["name"] = parts[0]
-				people = parts[1].split(',')
-				req["members"] = people
+				req["member"] = parts[1]
 				return req
 			else:
 				print >> sys.stderr, "Badly formed command\nType \'help\' for command syntax"
@@ -218,11 +232,13 @@ class ChatClient:
 		if reply["done"] in ['addgroup', 'mkgroup', 'send']:
 			print reply["body"]
 		elif reply["done"] == "unread_retrieve":
+			print "Messages: \n"
 			for msg in reply["msgs"]:
-				print msg
+				print msg + "\n"
 			self.prompt = "chat>"
 		elif reply["done"] == "unread_count":
-			self.prompt = "chat[{} unread messages]>".format(reply["count"])
+			if reply["count"] > 0:
+				self.prompt = "chat[{} unread messages]>".format(reply["count"])
 		else:
 			print >> sys.stderr, "Unrecognized operation {}".format(reply["done"])
 
@@ -240,9 +256,10 @@ class ChatClient:
 		self.sock.sendln(b64encode(json.dumps(req)))
 		rep = json.loads(b64decode(self.sock.recvln()))
 		self.socket_lock.release()
-		if rep["status"] == "OK":
+		if rep["status"] == "OK" and rep["count"] > 0:
 			self.prompt = "chat[{} unread messages]>".format(rep["count"])
-		threading.Timer(self.interval, unread_check_auto).start()
+		self.timer = threading.Timer(self.interval, self.unread_check_auto)
+		self.timer.start()
 
 	def login(self, password):
 		"""
@@ -255,15 +272,15 @@ class ChatClient:
 		req["password"] = password
 		self.sock.sendln(b64encode(json.dumps(req)))
 		resp = json.loads(b64decode(self.sock.recvln()))
-		if resp["status"] == "OK":	#user found
-			return resp["logged_in"]	#correct password?
-		elif resp["stat"] == "ERR":
-			print "User not found in system."
-			self.signup()
+		if resp["status"] == "OK":	#user found and correct pw
+			return True
+		elif resp["status"] == "ERR":
+			print "User not found in system. Error: {}".format(resp["body"])
 		return False
 
 	def signup(self):
 		from getpass import getpass
+		req = {}
 		u = raw_input("Enter new username: ")
 		pw = getpass("Enter your password: ")
 		pw_check = getpass("Enter your password again: ")
@@ -297,19 +314,26 @@ class ChatClient:
 		"""
 		i/o main loop
 		"""
+		if self.first:
+			self.signup()
+			sys.exit(0)
 		if not self.user:
 			self.user = raw_input("Enter username: ")
 		from getpass import getpass
-		up = getpass("Enter password: ")
+		up = getpass("Logging in as {}....Enter password: ".format(self.user))
 		logged_in = self.login(up)
 		if not logged_in:
 			print >> sys.stderr, "Could not log in"
 			sys.exit(1)
 		if self.auto:
-			unread_check_auto()
+			self.unread_check_auto()
 		while True:
 			comstr = raw_input(self.prompt)
-			com = parse_command(comstr)
+			if not comstr:
+				continue
+			com = self.parse_command(comstr)
+			if com is None:
+				continue
 			if self.debug:
 				print "Sending: {}".format(com)
 			self.socket_lock.acquire()
@@ -318,7 +342,7 @@ class ChatClient:
 			self.socket_lock.release()
 			if self.debug:
 				print "Received: {}".format(rep)
-			parse_reply(rep)
+			self.parse_reply(rep)
 
 
 if __name__ == "__main__":
