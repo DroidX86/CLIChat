@@ -24,33 +24,116 @@ cs = None
 
 ########################################################################################################################
 
-def sendmsg(from, to, msg, timestamp):
+def sendmsg(frm, to, msg, timestamp):
+	"""
+	Send message to user or group
+	"""
 	global locks, mdir
-	pass
+	towrite = "[{}] to:{} from:{} \"{}\"".format(datetime.fromtimestamp(timestamp), to, frm, msg)
+	if to in userdb:
+		if os.path.isfile(mdir + to):
+			locks[to].acquire()
+			with open(mdir + to, 'a') as f:
+				f.write(towrite + "\n")
+				i += 1
+			locks[to].release()
+		return True, 1
+	elif to in groupdb:
+		to_list = groupdb[to]
+		i = 0
+		for r in to_list:
+			if os.path.isfile(mdir + r):
+				locks[r].acquire()
+				with open(mdir + r, 'a') as f:
+					f.write(towrite + "\n")
+					i += 1
+				locks[r].release()
+		return True, i
+	else:
+		return False, 0
 
-def unread_retrieve(from):
-	global locks, mdir
-	pass
 
-def unread_count(from):
+def unread_retrieve(frm):
+	"""
+	Get all messages from users file
+	"""
 	global locks, mdir
-	pass
+	if frm not in userdb:
+		return False, []
+	if not os.path.isfile(mdir + frm):
+		return False, []
+	locks[frm].acquire()
+	with open(mdir + frm, 'r') as f:
+		msgs = [line for line in f]
+	open(mdir + frm, 'w').close()
+	locks[frm].release()
+	return True, msgs
+
+def unread_count(frm):
+	"""
+	Get number of messages in a users mailbox
+	"""
+	global locks, mdir
+	if frm not in userdb:
+		return False, []
+	if not os.path.isfile(mdir + frm):
+		return False, []
+	locks[frm].acquire()
+	i = 0
+	with open(mdir + frm, 'r') as f:
+		for i, l in enumerate(f, 1):
+			pass
+	locks[frm].release()
+	return True, i
 
 def login(user, passwd):
-	global dblock
-	pass
+	"""
+	Log a user in
+	"""
+	if user not in userdb:
+		return False
+	else:
+		if userdb[user][1] = passwd:
+			return True
+	return False
 
 def signup(user, passwd):
+	"""
+	Add a user
+	"""
 	global dblock
-	pass
+	if user in userdb:
+		return False
+	dblock.acquire()
+	userdb[user] = (passwd, "USR")
+	dblock.release()
+	return True
 
 def mkgroup(name, members):
+	"""
+	Create new group
+	"""
 	global dblock
-	pass
+	if name in groupdb:
+		return False
+	dblock.acquire()
+	groupdb[name] = members
+	dblock.release()
+	return True
 
-def addgroup(name, members):
+def addgroup(name, members, user):
+	"""
+	Add members to group
+	"""
 	global dblock
-	pass
+	if name not in groupdb:
+		return False
+	if user not in groupdb[name]:
+		return False
+	dblock.acquire()
+	groupdb[name].extend(members)
+	dblock.release()
+	return True
 
 ########################################################################################################################
 
@@ -163,14 +246,14 @@ class ChatHandler(threading.Thread):
 						resp["status"] = "ERR"
 						resp["body"] = "No recipient"
 					else:
-						op = sendmsg(req["from"], req["to"], req["msg"], req["timestamp"])
+						op, sent = sendmsg(req["from"], req["to"], req["msg"], req["timestamp"])
 						if not op:
 							resp["status"] = "ERR"
 							resp["body"] = "Failed to send messages"
 						else:
 							resp["done"] = "send"
 							resp["status"] = "OK"
-							resp["body"] = "Messages sent"
+							resp["body"] = "Message sent to {} out of {} recipients".format(sent, len(req["to"]))
 				elif req["do"] = "unread_count":
 					op, count = unread_count(req["from"])
 					if not op:
@@ -209,7 +292,7 @@ class ChatHandler(threading.Thread):
 						resp["status"] = "ERR"
 						resp["body"] = "Missing arguments"
 					else:
-						op = addgroup(req["name"], req["members"])
+						op = addgroup(req["name"], req["members"], req["from"])
 						if not op:
 							resp["status"] = "ERR"
 							resp["body"] = "Could create group"
@@ -284,6 +367,7 @@ class ChatServer:
 			self.server_threads.append(ct)
 			ct.start()
 
+########################################################################################################################
 
 if __name__=='__main__':
 	signal.signal(signal.SIGINT, int_handler)
