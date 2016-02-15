@@ -14,8 +14,6 @@ class ChatServer:
 		self.port = 36699
 		self.server_sock = CustomSocket.newCustomSocket(socket.AF_INET, socket.SOCK_STREAM)
 		self.server_threads = None
-		self.server_processes = None
-		self.proc = False
 		self.userdb = "userdb"
 		self.mdir = "mailbox"
 
@@ -28,7 +26,6 @@ class ChatServer:
 		parser.add_argument("-p", "--port", help="Use given port instead of default (36699)", type=int)
 		parser.add_argument("-m", "--mailbox", help="Set the server to use this folder as mailbox (default: mailbox)")
 		parser.add_argument("-u", "--userdb", help="Set the server to use this file as user database (default: userdb)")
-		parser.add_argument("-f", "--fork", help="Fork processes instead of threads for handling clients", action='store_true')
 
 		args = parser.parse_args()
 
