@@ -2,6 +2,7 @@
 import socket, sys, time, datetime, signal, threading
 from connection import CustomSocket
 from requests import ConnectionError
+from base64 import b64decode, b64encode
 
 import simplejson as json
 
@@ -73,6 +74,9 @@ class ChatClient:
 			self.user = args.user
 
 	def read_config(self):
+		"""
+		Read default configuration from config file
+		"""
 		with open("chat.cfg", 'r') as cf:
 			for line in cf:
 				if line[0] == '#':
@@ -99,11 +103,17 @@ class ChatClient:
 					continue
 
 	def restore_contacts(self):
+		"""
+		Restore contacts from contacts_file
+		"""
 		with open(self.contacts_file, 'r') as cf:
 			jstr = cf.read()
 			self.contacts = json.loads(jstr)
 
 	def save_contacts(self):
+		"""
+		Save contacts to contacts_file
+		"""
 		with open(self.contacts_file, 'w') as cf:
 			jstr = json.dumps(self.contacts)
 			cf.write(jstr)
@@ -163,18 +173,27 @@ class ChatClient:
 		else:
 			#check for group definition
 			import re
-			mat = re.match('[a-zA-Z0-9_]+=.*')
-			if mat:
+			if re.match('[a-zA-Z0-9_]+=.*'):
 				req["do"] = 'mkgroup'
-				parts = command.split("+")
+				parts = command.split("=")
 				if len(parts) > 2:
 					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>..."
 					return None
-				req["group"] = parts[0]
+				req["name"] = parts[0]
 				people = parts[1].split(',')
 				if len(people) <= 1:
 					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>..."
 					return None
+				req["members"] = people
+				return req
+			elif re.match('[a-zA-Z0-9_]+\+=.*'):
+				req["do"] = 'addgroup'
+				parts = command.split("+=")
+				if len(parts) > 2:
+					print >> sys.stderr, "Badly formed group-add command\n<group>+=<user>+<user>..."
+					return None
+				req["name"] = parts[0]
+				people = parts[1].split(',')
 				req["members"] = people
 				return req
 			else:
@@ -196,7 +215,7 @@ class ChatClient:
 		if not reply["done"]:
 			print >> sys.stderr, "Mangled response from server (no operation)"
 			return
-		if reply["done"] in ['mkgroup', 'send']:
+		if reply["done"] in ['addgroup', 'mkgroup', 'send']:
 			print reply["body"]
 		elif reply["done"] == "unread_retrieve":
 			for msg in reply["msgs"]:
@@ -218,26 +237,49 @@ class ChatClient:
 		req["timestamp"] = time.time()
 		req["do"] = "unread_count"
 		self.socket_lock.acquire()
-		self.sock.sendln(json.dumps(req))
-		rep = json.loads(self.sock.recvln())
+		self.sock.sendln(b64encode(json.dumps(req)))
+		rep = json.loads(b64decode(self.sock.recvln()))
 		self.socket_lock.release()
 		if rep["status"] == "OK":
 			self.prompt = "chat[{} unread messages]>".format(rep["count"])
 		threading.Timer(self.interval, unread_check_auto).start()
 
 	def login(self, password):
+		"""
+		Do login request and parse response
+		"""
 		req = {}
 		req["from"] = self.user
 		req["timestamp"] = time.time()
 		req["do"] = "login"
 		req["password"] = password
-		reqstr = json.dumps(req)
-		self.sock.sendln(req)
-		respstr = self.sock.recvln()
-		resp = json.loads(respstr)
-		if resp["status"] == "OK":
-			return resp["logged_in"]
+		self.sock.sendln(b64encode(json.dumps(req)))
+		resp = json.loads(b64decode(self.sock.recvln()))
+		if resp["status"] == "OK":	#user found
+			return resp["logged_in"]	#correct password?
+		elif resp["stat"] == "ERR":
+			print "User not found in system."
+			self.signup()
 		return False
+
+	def signup(self):
+		from getpass import getpass
+		u = raw_input("Enter new username: ")
+		pw = getpass("Enter your password: ")
+		pw_check = getpass("Enter your password again: ")
+		if pw != pw_check:
+			print "Passwords do not match!"
+			return
+		req["from"] = u
+		req["timestamp"] = time.time()
+		req["do"] = 'signup'
+		req["password"] = pw
+		self.sock.sendln(b64encode(json.dumps(req)))
+		resp = json.loads(b64decode(self.sock.recvln()))
+		if resp["status"] == "OK": #done
+			print "Signed up, restart the client to login"
+		else:
+			print "Could not sign up user"
 
 	def connect_socket(self):
 		"""
@@ -271,8 +313,8 @@ class ChatClient:
 			if self.debug:
 				print "Sending: {}".format(com)
 			self.socket_lock.acquire()
-			self.sock.sendln(json.dumps(com))
-			rep = json.loads(elf.sock.recvln())
+			self.sock.sendln(b64encode(json.dumps(com)))
+			rep = json.loads(b64decode(self.sock.recvln()))
 			self.socket_lock.release()
 			if self.debug:
 				print "Received: {}".format(rep)
