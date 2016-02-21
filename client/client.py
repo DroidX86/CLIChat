@@ -1,4 +1,4 @@
-#Generic client for connecting to multiple servers and send commands
+#Chat client for connecting to server and send commands
 import socket, sys, time, datetime, signal, threading
 from connection import CustomSocket
 from requests import ConnectionError
@@ -38,6 +38,7 @@ class ChatClient:
 		self.socket_lock = threading.Lock()
 		self.contacts_file = 'contacts'
 		self.first = False
+		self.archive = False
 		self.contacts = {}
 		self.messages = []
 		self.prompt = "chat>"
@@ -58,6 +59,7 @@ class ChatClient:
 		parser.add_argument("-i", "--interval", help="Interval for checking messages", type=int)
 		parser.add_argument("-u", "--user", help="Login as this user (will be prompted for password)")
 		parser.add_argument("-f", "--first", help="Sign up instead of logging in", action='store_true')
+		parser.add_argument("-z", "--archive", help="Turn on archiving of read messages", action='store_true')
 
 		args = parser.parse_args()
 
@@ -79,6 +81,8 @@ class ChatClient:
 			self.user = args.user
 		if args.first:
 			self.first = True
+		if args.archive:
+			self.archive = True
 
 	def read_config(self):
 		"""
@@ -126,16 +130,17 @@ class ChatClient:
 		"""
 		with open(self.contacts_file, 'w') as cf:
 			jstr = json.dumps(self.contacts)
-			if jstr:
-				cf.write(jstr)
+			cf.write(jstr)
 
 	def print_help(self):
 		print "Chat client commads and syntax:"
 		print "-   @<user/group> \"<message>\" : Send message to user or group"
-		print "-   ? : Get number of unread messags from server (if any) and read them"
+		print "-   ? : Get number of unread messages"
 		print "-   read : Read all unread messages"
 		print "-   +<user> \"<keyword>\" : Add mapping to contacts list"
 		print "-   <group>=<user1>+<user2>+... : Create multicast group"
+		print "-   <group>+=<user> : Add user to existing group"
+		print "-   find <keyword> : Find contact using keyword"
 		print "-   help : Print this help message"
 		print "-   quit : Quit from chat"
 
@@ -166,7 +171,7 @@ class ChatClient:
 			if len(parts) < 2:
 				print >> sys.stderr, "Badly formed contact command\n+<user> <keyword>"
 				return None
-			self.contacts[parts[1]] = parts[0]
+			self.contacts[parts[1].rstrip().lower()] = parts[0][1:]
 			return None
 		elif command == "read":
 			#retrieve unread
@@ -183,6 +188,15 @@ class ChatClient:
 				self.timer.cancel()
 			self.sock.close()
 			sys.exit(0)
+		elif command.startswith("find "):
+			#search
+			parts = command.split(None, 1)
+			srch = parts[1].rstrip().lower()
+			if srch in self.contacts:
+				print "Found contact: {} [{}]".format(self.contacts[srch], srch)
+			else:
+				print "Found nobody"
+			return None
 		else:
 			#check for group definition
 			import re
@@ -194,7 +208,6 @@ class ChatClient:
 					return None
 				req["name"] = parts[0]
 				people = parts[1].split('+')
-				print "people={}".format(people)
 				if len(people) <= 1:
 					print >> sys.stderr, "Badly formed group command\n<group>=<user>+<user>...2"
 					return None
@@ -236,6 +249,10 @@ class ChatClient:
 			for msg in reply["msgs"]:
 				print msg + "\n"
 			self.prompt = "chat>"
+			if self.archive:
+				with open(self.user, 'a') as af:
+					for msg in reply["msgs"]:
+						af.write(msg+"\n")
 		elif reply["done"] == "unread_count":
 			if reply["count"] > 0:
 				self.prompt = "chat[{} unread messages]>".format(reply["count"])
@@ -327,6 +344,7 @@ class ChatClient:
 			sys.exit(1)
 		if self.auto:
 			self.unread_check_auto()
+		self.restore_contacts()
 		while True:
 			comstr = raw_input(self.prompt)
 			if not comstr:

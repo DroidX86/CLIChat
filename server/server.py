@@ -375,8 +375,8 @@ class ChatServer:
 
 if __name__=='__main__':
 	signal.signal(signal.SIGINT, int_handler)
-	cs = ChatServer(host, port)
 	options()
+	cs = ChatServer(host, port)
 	startup()
 	print_server_settings()
 	cs.serve_forever()
